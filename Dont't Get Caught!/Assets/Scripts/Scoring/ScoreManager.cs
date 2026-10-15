@@ -42,10 +42,12 @@ namespace DontGetCaught.Scoring
 
         private void HandleStateChanged(DontGetCaught.Core.GameState previous, DontGetCaught.Core.GameState next)
         {
-            if (next == DontGetCaught.Core.GameState.Playing
-                && (previous == DontGetCaught.Core.GameState.Ready
-                    || previous == DontGetCaught.Core.GameState.Won
-                    || previous == DontGetCaught.Core.GameState.Lost))
+            bool newRoundState = next == DontGetCaught.Core.GameState.Playing
+                                 || next == DontGetCaught.Core.GameState.WaitingForPickup;
+            bool justStarted = previous == DontGetCaught.Core.GameState.Ready
+                               || previous == DontGetCaught.Core.GameState.Won
+                               || previous == DontGetCaught.Core.GameState.Lost;
+            if (newRoundState && justStarted)
             {
                 TotalScore = 0;
                 ScoreChanged?.Invoke(TotalScore);

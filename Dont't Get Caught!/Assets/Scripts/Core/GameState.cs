@@ -11,6 +11,7 @@
         TeacherWarning,
         TeacherChecking,
         CaughtRecovery,
+        WaitingForPickup,
         Won,
         Lost
     }

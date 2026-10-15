@@ -40,10 +40,11 @@ namespace DontGetCaught.Noodle
                 return;
             }
 
-            float airflow = inputRouter.CurrentSample.Airflow;
+            GameInputSample sample = inputRouter.CurrentSample;
+            float airflow = sample.Airflow;
             float threshold = gameManager.Config.airflowThreshold;
 
-            if (!inputRouter.CurrentSample.IsConnected || airflow <= threshold)
+            if (!sample.IsConnected || sample.ForkReturned || sample.CupReturned || airflow <= threshold)
             {
                 SetEating(false);
                 belowThresholdSeconds += Time.deltaTime;
@@ -71,10 +72,9 @@ namespace DontGetCaught.Noodle
             }
         }
 
-private bool CanEatInCurrentState()
+        private bool CanEatInCurrentState()
         {
-            return gameManager.CurrentState == GameState.Playing
-                   || gameManager.CurrentState == GameState.TeacherWarning;
+            return gameManager.CurrentState == GameState.Playing;
         }
 
         private void ResetProgress()

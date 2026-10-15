@@ -1,5 +1,5 @@
-﻿using System;
-using DontGetCaught.Core;
+﻿using DontGetCaught.Core;
+using DontGetCaught.Input;
 using DontGetCaught.Scoring;
 using TMPro;
 using UnityEngine;
@@ -7,22 +7,30 @@ using UnityEngine;
 namespace DontGetCaught.UI
 {
     /// <summary>
-    /// Minimal text HUD for round time, lives, score, and current state.
+    /// Displays round stats, current state, and each prop return-point sensor separately.
     /// </summary>
     public sealed class GameHUD : MonoBehaviour
     {
         [SerializeField] private GameManager gameManager;
         [SerializeField] private ScoreManager scoreManager;
+        [SerializeField] private InputRouter inputRouter;
         [SerializeField] private TMP_Text timerText;
         [SerializeField] private TMP_Text livesText;
         [SerializeField] private TMP_Text scoreText;
         [SerializeField] private TMP_Text statusText;
+        [SerializeField] private TMP_Text forkStationText;
+        [SerializeField] private TMP_Text cupStationText;
 
         private int lastDisplayedSecond = -1;
         private string lastCaughtReason;
+        private GameInputSample lastInputSample;
+        private GameState displayedState = GameState.Ready;
 
         private void OnEnable()
         {
+            if (gameManager == null) gameManager = FindFirstObjectByType<GameManager>();
+            if (scoreManager == null) scoreManager = FindFirstObjectByType<ScoreManager>();
+            if (inputRouter == null) inputRouter = FindFirstObjectByType<InputRouter>();
             if (gameManager != null)
             {
                 gameManager.TimerChanged += HandleTimerChanged;
@@ -31,13 +39,20 @@ namespace DontGetCaught.UI
                 gameManager.PlayerCaught += HandlePlayerCaught;
                 HandleTimerChanged(gameManager.RemainingSeconds);
                 HandleLivesChanged(gameManager.RemainingLives);
-                HandleStateChanged(GameState.Ready, gameManager.CurrentState);
+                displayedState = gameManager.CurrentState;
+                RenderStatus();
             }
 
             if (scoreManager != null)
             {
                 scoreManager.ScoreChanged += HandleScoreChanged;
                 HandleScoreChanged(scoreManager.TotalScore);
+            }
+
+            if (inputRouter != null)
+            {
+                inputRouter.SampleUpdated += HandleSampleUpdated;
+                HandleSampleUpdated(inputRouter.CurrentSample);
             }
         }
 
@@ -55,6 +70,11 @@ namespace DontGetCaught.UI
             {
                 scoreManager.ScoreChanged -= HandleScoreChanged;
             }
+
+            if (inputRouter != null)
+            {
+                inputRouter.SampleUpdated -= HandleSampleUpdated;
+            }
         }
 
         private void HandleTimerChanged(float secondsRemaining)
@@ -68,7 +88,7 @@ namespace DontGetCaught.UI
             lastDisplayedSecond = totalSeconds;
             if (timerText != null)
             {
-                timerText.text = TimeSpan.FromSeconds(totalSeconds).ToString(@"mm\:ss");
+                timerText.text = System.TimeSpan.FromSeconds(totalSeconds).ToString(@"mm\:ss");
             }
         }
 
@@ -90,33 +110,57 @@ namespace DontGetCaught.UI
 
         private void HandleStateChanged(GameState previous, GameState current)
         {
-            if (statusText != null)
-            {
-                statusText.text = current switch
-                {
-                    GameState.Ready => "Ready",
-                    GameState.Playing => "Playing",
-                    GameState.TeacherWarning => "Teacher warning",
-                    GameState.TeacherChecking => "Teacher checking",
-                    GameState.CaughtRecovery => string.IsNullOrEmpty(lastCaughtReason)
-                        ? "Put the props away"
-                        : $"Caught: {lastCaughtReason} - put the props away",
-                    GameState.Won => "Round complete",
-                    GameState.Lost => "Game over",
-                    _ => current.ToString()
-                };
-            }
+            displayedState = current;
+            RenderStatus();
         }
 
         private void HandlePlayerCaught(string reason, int remainingLives)
         {
             lastCaughtReason = reason;
-            if (statusText != null)
-            {
-                statusText.text = $"Caught: {reason}";
-            }
+            RenderStatus();
         }
+
+        private void HandleSampleUpdated(GameInputSample sample)
+        {
+            lastInputSample = sample;
+            string disconnected = sample.IsConnected ? string.Empty : " (no input)";
+            if (forkStationText != null)
+                forkStationText.text = $"F - Fork station: {(sample.ForkReturned ? "AT STATION" : "PICKED UP")}{disconnected}";
+            if (cupStationText != null)
+                cupStationText.text = $"C - Cup station: {(sample.CupReturned ? "AT STATION" : "PICKED UP")}{disconnected}";
+            RenderStatus();
+        }
+
+        private void RenderStatus()
+        {
+            if (statusText == null) return;
+            string message = displayedState switch
+            {
+                GameState.Ready => "Ready",
+                GameState.Playing => "Playing - both props picked up",
+                GameState.TeacherWarning => "Warning - stop inhaling and return both props",
+                GameState.TeacherChecking => "Teacher checking - keep still and both props at their stations",
+                GameState.CaughtRecovery => BuildCaughtStatus(),
+                GameState.WaitingForPickup => "Teacher is away - pick up both props to resume",
+                GameState.Won => "Round complete",
+                GameState.Lost => "Game over",
+                _ => displayedState.ToString()
+            };
+            if (forkStationText == null || cupStationText == null)
+            {
+                string disconnected = lastInputSample.IsConnected ? string.Empty : " (no input)";
+                message += $"\nF - Fork station: {(lastInputSample.ForkReturned ? "AT STATION" : "PICKED UP")}{disconnected}";
+                message += $"\nC - Cup station: {(lastInputSample.CupReturned ? "AT STATION" : "PICKED UP")}{disconnected}";
+            }
+            statusText.text = message;
+        }
+
+        private string BuildCaughtStatus()
+        {
+            return string.IsNullOrEmpty(lastCaughtReason)
+                ? "Caught - stop inhaling and return both props"
+                : $"Caught: {lastCaughtReason} Return both props, then pick them up to resume";
+        }
+
     }
 }
-
-

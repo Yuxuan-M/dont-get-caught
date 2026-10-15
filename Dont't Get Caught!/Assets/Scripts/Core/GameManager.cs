@@ -1,17 +1,22 @@
 ﻿using System;
+using DontGetCaught.Input;
 using UnityEngine;
 
 namespace DontGetCaught.Core
 {
     /// <summary>
-    /// Owns round state, timer, lives, and win/loss decisions.
-    /// Other systems report events or request transitions; they never assign CurrentState.
+    /// Owns round state, timer, lives, teacher-check results, and pickup gating.
+    /// Other systems request transitions through this component instead of setting state directly.
     /// </summary>
     public sealed class GameManager : MonoBehaviour
     {
         [SerializeField] private GameConfig config = new GameConfig();
-        // [TEST] no lobby for now
+        [SerializeField] private InputRouter inputRouter;
         [SerializeField] private bool startRoundOnPlay = true;
+
+        private float caughtRecoveryElapsed;
+        private bool recoveryTimerResumed;
+        private bool hasWarnedAboutMissingInput;
 
         public GameState CurrentState { get; private set; } = GameState.Ready;
         public float RemainingSeconds { get; private set; }
@@ -20,7 +25,8 @@ namespace DontGetCaught.Core
         public bool IsRoundActive => CurrentState == GameState.Playing
                                      || CurrentState == GameState.TeacherWarning
                                      || CurrentState == GameState.TeacherChecking
-                                     || CurrentState == GameState.CaughtRecovery;
+                                     || CurrentState == GameState.CaughtRecovery
+                                     || CurrentState == GameState.WaitingForPickup;
 
         public event Action<GameState, GameState> StateChanged;
         public event Action<float> TimerChanged;
@@ -30,6 +36,11 @@ namespace DontGetCaught.Core
 
         private void Awake()
         {
+            if (inputRouter == null)
+            {
+                inputRouter = FindFirstObjectByType<InputRouter>();
+            }
+
             RemainingSeconds = Mathf.Max(1f, config.roundDurationSeconds);
             RemainingLives = Mathf.Max(1, config.startingLives);
         }
@@ -44,9 +55,23 @@ namespace DontGetCaught.Core
 
         private void Update()
         {
-            if (CurrentState != GameState.Playing
-                && CurrentState != GameState.TeacherWarning
-                && CurrentState != GameState.TeacherChecking)
+            if (CurrentState == GameState.CaughtRecovery)
+            {
+                caughtRecoveryElapsed += Time.deltaTime;
+                if (!recoveryTimerResumed
+                    && caughtRecoveryElapsed >= config.caughtRecoveryTimeoutSeconds)
+                {
+                    recoveryTimerResumed = true;
+                }
+
+                TryCompleteCaughtRecovery();
+            }
+            else if (CurrentState == GameState.WaitingForPickup)
+            {
+                TryCompletePickup();
+            }
+
+            if (!ShouldAdvanceRoundTimer())
             {
                 return;
             }
@@ -60,41 +85,82 @@ namespace DontGetCaught.Core
             }
         }
 
-        /// <summary>Starts or restarts a round and resets its timer and lives.</summary>
+        /// <summary>Starts or restarts a round and resets its timer, lives, and recovery timer.</summary>
         public void StartRound()
         {
-            if (CurrentState == GameState.Playing)
+            if (IsRoundActive)
             {
                 return;
             }
 
             RemainingSeconds = Mathf.Max(1f, config.roundDurationSeconds);
             RemainingLives = Mathf.Max(1, config.startingLives);
+            caughtRecoveryElapsed = 0f;
+            recoveryTimerResumed = false;
             TimerChanged?.Invoke(RemainingSeconds);
             LivesChanged?.Invoke(RemainingLives);
-            ChangeState(GameState.Playing);
+            GameInputSample sample = inputRouter != null ? inputRouter.CurrentSample : GameInputSample.Disconnected;
+            ChangeState(sample.IsConnected && !sample.ForkReturned && !sample.CupReturned
+                ? GameState.Playing
+                : GameState.WaitingForPickup);
         }
 
-        /// <summary>Requests a legal teacher-flow state change.</summary>
-        public void SetTeacherPhase(GameState nextPhase)
+        /// <summary>Enters the warning phase while the round is active.</summary>
+        public void BeginTeacherWarning()
         {
-            if (nextPhase != GameState.TeacherWarning
-                && nextPhase != GameState.TeacherChecking
-                && nextPhase != GameState.Playing)
+            if (CurrentState == GameState.Playing)
             {
-                Debug.LogWarning($"Rejected teacher phase: {nextPhase}.", this);
+                ChangeState(GameState.TeacherWarning);
+            }
+        }
+
+        /// <summary>Begins a teacher check. Teacher AI or the temporary test input can call this.</summary>
+        public void BeginTeacherChecking()
+        {
+            if (CurrentState == GameState.Playing || CurrentState == GameState.TeacherWarning)
+            {
+                ChangeState(GameState.TeacherChecking);
+            }
+        }
+
+        /// <summary>
+        /// Resolves a teacher check using the latest normalized input sample.
+        /// A successful check leads to WaitingForPickup, never directly to Playing.
+        /// </summary>
+        public void ResolveTeacherCheck()
+        {
+            if (CurrentState != GameState.TeacherChecking)
+            {
                 return;
             }
 
-            if (CurrentState == GameState.Playing
-                || CurrentState == GameState.TeacherWarning
-                || CurrentState == GameState.TeacherChecking)
+            if (!TryGetConnectedSample(out GameInputSample sample))
             {
-                ChangeState(nextPhase);
+                return;
             }
+
+            if (sample.Airflow > config.airflowThreshold)
+            {
+                ReportCaught("Still inhaling!");
+                return;
+            }
+
+            if (!sample.ForkReturned)
+            {
+                ReportCaught("Fork is not at its return point!");
+                return;
+            }
+
+            if (!sample.CupReturned)
+            {
+                ReportCaught("Noodle cup is not at its return point!");
+                return;
+            }
+
+            ChangeState(GameState.WaitingForPickup);
         }
 
-        /// <summary>Reports one failed teacher check and enters recovery or loss.</summary>
+        /// <summary>Reports a failed teacher check and enters recovery or loss.</summary>
         public void ReportCaught(string reason)
         {
             if (CurrentState != GameState.TeacherChecking)
@@ -113,15 +179,17 @@ namespace DontGetCaught.Core
                 return;
             }
 
+            caughtRecoveryElapsed = 0f;
+            recoveryTimerResumed = false;
             ChangeState(GameState.CaughtRecovery);
         }
 
-        /// <summary>Resumes play after the player finishes arranging the props.</summary>
+        /// <summary>Attempts to complete recovery; props must be returned and airflow stopped.</summary>
         public void CompleteRecovery()
         {
             if (CurrentState == GameState.CaughtRecovery)
             {
-                ChangeState(GameState.Playing);
+                TryCompleteCaughtRecovery();
             }
         }
 
@@ -143,6 +211,62 @@ namespace DontGetCaught.Core
             RoundEnded?.Invoke(result);
         }
 
+        private bool ShouldAdvanceRoundTimer()
+        {
+            return CurrentState == GameState.Playing
+                   || CurrentState == GameState.TeacherWarning
+                   || CurrentState == GameState.TeacherChecking
+                   || CurrentState == GameState.WaitingForPickup
+                   || (CurrentState == GameState.CaughtRecovery && recoveryTimerResumed);
+        }
+
+        private void TryCompleteCaughtRecovery()
+        {
+            if (!TryGetConnectedSample(out GameInputSample sample))
+            {
+                return;
+            }
+
+            bool airflowStopped = sample.Airflow <= config.airflowThreshold;
+            if (airflowStopped && sample.ForkReturned && sample.CupReturned)
+            {
+                caughtRecoveryElapsed = 0f;
+                recoveryTimerResumed = false;
+                ChangeState(GameState.WaitingForPickup);
+            }
+        }
+
+        private void TryCompletePickup()
+        {
+            if (!TryGetConnectedSample(out GameInputSample sample))
+            {
+                return;
+            }
+
+            if (!sample.ForkReturned && !sample.CupReturned)
+            {
+                ChangeState(GameState.Playing);
+            }
+        }
+
+        private bool TryGetConnectedSample(out GameInputSample sample)
+        {
+            sample = inputRouter != null ? inputRouter.CurrentSample : GameInputSample.Disconnected;
+            if (sample.IsConnected)
+            {
+                hasWarnedAboutMissingInput = false;
+                return true;
+            }
+
+            if (!hasWarnedAboutMissingInput)
+            {
+                Debug.LogWarning("Cannot resolve the teacher check until the input source is connected.", this);
+                hasWarnedAboutMissingInput = true;
+            }
+
+            return false;
+        }
+
         private void ChangeState(GameState nextState)
         {
             if (CurrentState == nextState)
@@ -156,6 +280,3 @@ namespace DontGetCaught.Core
         }
     }
 }
-
-
-
